@@ -23,6 +23,7 @@ library(Amelia)
 library(ggsci)
 library(factoextra)
 library(aplot)
+library(gbm)
 ```
 
 ## Opening test and train datasets
@@ -35,7 +36,7 @@ testing <- read.csv(url(test_url))
 
 ## Tidying datasets
 The variables such as username, timestamps and time windows are removed from the data sets. The empty fields are being replaced with NA. There are some variables that have almost only NA; those are removed. From the test set only variables that are also present in the training set are kept. 
-```{r}
+```{r cache = TRUE}
 dim(training)
 names(testing)
 training$X[1:10]
@@ -104,8 +105,8 @@ plot_list(l)
 ```
 
 ## Model training
-I first removed the variables with less than 1% unique values. The training set is divided in a train and test set (75% vs 25%). I trained a gradient boosted model on the train set while centering and scaling the predictors. This model is used to predict movement classes on the testing partition, and from this a confusion matrix is made. The accuracy of the model on this set is 96.55%. The most misclassification takes place in class B, throwing elbows to front, with a misclassification rate of 5.9%.
-```{r cache=TRUE}
+I first removed the variables with less than 1% unique values. The training set is divided in a train and test set (75% vs 25%). I trained a gradient boosted model on the train set while centering and scaling the predictors. This model is used to predict movement classes on the testing partition.
+```{r cache=TRUE, message=FALSE, results="hide"}
 rownames(train) <- train$X
 train <- train %>% select(-X, -user_name)
 nearZero <- nearZeroVar(train, saveMetrics = TRUE)
@@ -121,14 +122,18 @@ set.seed(1234)
 fit <- train(classe ~ ., method="gbm", data=train, 
              preProcess=c("center", "scale"))
 pred <- predict(fit, crossVal, type = "raw")
+```
 
+## Confusion matrix
+A confusion matrix is made from the predicted values versus the actual classes. The accuracy of the model on this set is 96.55%. The most misclassification takes place in class B, throwing elbows to front, with a misclassification rate of 5.9%.
+```{r}
 matrix <- confusionMatrix(pred, crossVal$classe)
 matrix
 ```
 
 ## Feature importance plot
+The importance of features for the model can be retrieved using `varImp()`. The most important features are "roll belt", "pitch forearm", and "yaw belt". The top predictors with relative importance can be found in the plot below.
 ```{r}
-library(gbm)
 imp <- varImp(fit)$importance
 imp <- imp %>% arrange(-Overall) %>% slice(1:20) %>% 
           mutate(name=fct_inorder(rownames(.)), 
@@ -143,6 +148,7 @@ ggplot(data=imp, aes(y=Overall, x=name)) +
 
 
 ## Model testing
+The trained model is used to predict movement classes in the test set. The predictions are presented in a table.
 ```{r}
 rownames(test) <- test$X
 test <- test %>% select(-X)
@@ -156,3 +162,5 @@ table(number=c(1:20), pred)
 
 ## Conclusions
 The gradient boosted model had an accuracy of 96.5% (CI 96.0-97.1%) on the test partition of the training data, with variables "roll belt", "pitch forearm", and "yaw belt", as top 3 predictors. The predictions on the test set can be found above.
+
+
