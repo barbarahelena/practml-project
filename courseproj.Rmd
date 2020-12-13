@@ -1,0 +1,158 @@
+---
+title: "Course Project Practical ML"
+author: "Barbara Verhaar"
+date: "12/11/2020"
+output: html_document
+---
+
+## Synopsis
+In this project for the practical ML course (Coursera), the goal was to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform an unilateral dumbbell biceps curl lifts correctly and incorrectly in 5 different ways with 10 repetitions: A) according to specification, B) throwing elbows to front, C) lifting only halfway, D) lowering only halfway, E) throwing the hips to the front. Read more on this page: http:/groupware.les.inf.puc-rio.br/har#ixzz4TjprBEIK.
+
+In these analyses, I first removed all variables that were not of interest (date, timestamp), and the ones with missing variables. I assessed the predictor variables using dimension reduction with a PCA for every participant separately, since the difference between participants was larger than the difference between classes.
+
+I divided the training dataset in a train and test set (75 vs 25%), and I trained a gradient boosted model on the train partition to predict the class of the movement (variable: classe). I also plotted the most important features for this model. I assessed the model's performance on the test partition. Finally, I predicted the movement classes within the actual test data set. The data for this project come from this source: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har.
+
+The model had an accuracy of 96.5% (CI 96.0-97.1%), with variables "roll belt", "pitch forearm", and "yaw belt", as top 3 predictors. The table with predictions is presented at the end of this script.
+
+## Libraries used
+```{r message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(caret)
+library(Amelia)
+library(ggsci)
+library(factoextra)
+library(aplot)
+```
+
+## Opening test and train datasets
+```{r}
+training_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+training <- read.csv(url(training_url))
+testing <- read.csv(url(test_url))
+```
+
+## Tidying datasets
+The variables such as username, timestamps and time windows are removed from the data sets. The empty fields are being replaced with NA. There are some variables that have almost only NA; those are removed. From the test set only variables that are also present in the training set are kept. 
+```{r}
+dim(training)
+names(testing)
+training$X[1:10]
+training$classe[1:10]
+
+train <- training %>% 
+    select(-c(3:7)) %>% 
+    mutate(classe = as.factor(as.character(classe))) %>% 
+    mutate(user_name = as.factor(as.character(user_name))) %>% 
+    mutate_if(is.character, list(~na_if(., ""))) %>% 
+    mutate_if(is.character, list(~na_if(., "#DIV/0!"))) %>% 
+    mutate_if(is.character, as.numeric) %>% 
+    mutate_if(is.integer, as.numeric)
+missmap(train)
+train <- train[,which(colSums(is.na(train))==0)]
+dim(train)
+any(is.na(train)) ## FALSE
+
+test <- testing %>%
+    select(-c(2:7)) %>% 
+    mutate_if(is.character, list(~na_if(., ""))) %>% 
+    mutate_if(is.character, list(~na_if(., "#DIV/0!"))) %>% 
+    mutate_if(is.character, as.numeric) %>% 
+    mutate_if(is.integer, as.numeric)
+test <- test[,which(colSums(is.na(test))==0)]
+dim(test)
+
+```
+
+## Exploratory analyses
+
+### PCA predictors
+I made separate PCA plots for each user, since the differences between users seemed to be larger than the differences between classes. The class E movements (purple) seem to be most different from the other groups, but in the other groups there is also quite a lot of overlap.
+```{r}
+x <- 1
+l <- list()
+for(i in levels(train$user_name)){
+      df <- train %>% filter(user_name==i)
+      mat <- df %>% select(-c(1,2,55))
+      index <- apply(mat, 2, function(x) ifelse(sd(x)==0, 1, 0))
+      mat <- mat[,which(index!=1)]
+      rownames(mat) <- df$X
+      mat <- as.matrix(mat)
+      
+      set.seed(4321)
+      res.pca <- prcomp(mat, scale = TRUE)
+      sum <- summary(res.pca)
+      sum
+      pca.data <- as.data.frame(res.pca$x[, 1:2])
+      pca.data$classe <- df$classe[match(rownames(pca.data), df$X)]
+      pca.data
+      
+      pl <- ggplot(pca.data, aes(x=PC1, y=PC2, color=classe)) +
+        geom_point(alpha = 0.3)+
+        scale_color_lancet() +
+        theme_minimal() +
+        stat_ellipse() +
+        labs(x=str_c('PC1 ', round(sum$importance[2,1]*100, 1), '%'), 
+             y=str_c('PC2 ', round(sum$importance[2,2]*100,1), '%'), 
+              title=i)
+      l[[x]] <- pl
+      x <- x+1
+}
+
+plot_list(l)
+```
+
+## Model training
+I first removed the variables with less than 1% unique values. The training set is divided in a train and test set (75% vs 25%). I trained a gradient boosted model on the train set while centering and scaling the predictors. This model is used to predict movement classes on the testing partition, and from this a confusion matrix is made. The accuracy of the model on this set is 96.55%. The most misclassification takes place in class B, throwing elbows to front, with a misclassification rate of 5.9%.
+```{r cache=TRUE}
+rownames(train) <- train$X
+train <- train %>% select(-X, -user_name)
+nearZero <- nearZeroVar(train, saveMetrics = TRUE)
+train <- train %>% select_if(nearZero$percentUnique>1|colnames(.)=="classe")
+
+set.seed(4321)
+inTrain <- createDataPartition(train$classe, p = 0.75, list = FALSE)
+train2 <- train[inTrain,]
+crossVal <- train[-inTrain,]
+
+## model
+set.seed(1234)
+fit <- train(classe ~ ., method="gbm", data=train, 
+             preProcess=c("center", "scale"))
+pred <- predict(fit, crossVal, type = "raw")
+
+matrix <- confusionMatrix(pred, crossVal$classe)
+matrix
+```
+
+## Feature importance plot
+```{r}
+library(gbm)
+imp <- varImp(fit)$importance
+imp <- imp %>% arrange(-Overall) %>% slice(1:20) %>% 
+          mutate(name=fct_inorder(rownames(.)), 
+                 name=fct_rev(name))
+
+ggplot(data=imp, aes(y=Overall, x=name)) +
+  geom_bar(stat="identity", fill=pal_lancet()(1)) +
+  coord_flip() +
+  theme_minimal() +
+  labs(x="", y="Feature importance (%)", title="Relative feature importance")
+```
+
+
+## Model testing
+```{r}
+rownames(test) <- test$X
+test <- test %>% select(-X)
+nearZero <- nearZeroVar(test, saveMetrics = TRUE)
+train <- test %>% select_if(nearZero$percentUnique>1)
+
+## predict
+pred <- predict(fit, test)
+table(number=c(1:20), pred)
+```
+
+## Conclusions
+The gradient boosted model had an accuracy of 96.5% (CI 96.0-97.1%) on the test partition of the training data, with variables "roll belt", "pitch forearm", and "yaw belt", as top 3 predictors. The predictions on the test set can be found above.
